@@ -2,20 +2,6 @@ import torch
 import torch.nn as nn
 from modules import GQA, FFN, RMSE_NORM, Frequencies
 
-# config = {
-#     "model": {
-#         "num_blocks": 2,
-#         "hidden_dims": 256,
-#         "num_heads_q": 8,
-#         "num_heads_kv": 4,
-#         "seq_length": 4096,
-#         "ffn_multiplier": 4,
-#         "vocab_size": 52000,
-#         "eps": 1e-5,
-#         "head_dim": 256//8
-#     }
-# }
-
 class Attention_Block(nn.Module):
   def __init__(self,config):
     super().__init__()
@@ -25,8 +11,8 @@ class Attention_Block(nn.Module):
     self.norm2 = RMSE_NORM(config["hidden_dims"], config["eps"])
     self.ffn = FFN(config["hidden_dims"], config["ffn_multiplier"])
     
-  def forward(self,x):
-    x = x + self.atten(self.norm1(x))
+  def forward(self,x,audio_freq,cond_freq):
+    x = x + self.atten(self.norm1(x),audio_freq,cond_freq)
     x = self.ffn(self.norm2(x))
     return x
   
@@ -40,23 +26,27 @@ class Transformer(nn.Module):
     self.rmse_norm = RMSE_NORM(config["hidden_dims"],config["eps"])
     
     self.final_heads = nn.ModuleList([nn.Linear(config["hidden_dims"], config["num_cd_vectors"], bias=False) for _ in range(config["num_codebooks"])])
-    self.freq = Frequencies(config["seq_length"], config["head_dim"])
+    self.audio_freq = Frequencies(config["max_audio_seq_length"], config["head_dim"])
+    self.conditional_freq = Frequencies(config["max_cond_seq_length"], config["head_dim"])
+    self.register_buffer("audio_rope_freq", self.audio_freq)
+    self.register_buffer("conditional_rope_freq", self.conditional_freq)
     
-  def forward(self, conditional_input :torch.Tensor, audio_tokens: torch.Tensor):
+  def forward(self, audio_tokens: torch.Tensor, conditional_input :torch.Tensor):
     #(b,s) -> (b,s,d)
-    cond_input = self.conditional_embedding(conditional_input)
+    cond_input = self.conditional_embedding(conditional_input) #considering text only
     #(b,s,num_codebook) -> (b,s,num_codebook,d) #for discrete tokenization
     audio_input = self.codebook_embedding(audio_tokens)
     
+    cond_len = cond_input.shape[1]
+    audio_len = audio_input.shape[1]
+    
     #cond_input -> prefix
-    audio_input = torch.sum(audio_tokens, dim=2)
+    audio_input = torch.sum(audio_input, dim=2)
     x = torch.cat([cond_input, audio_input], dim=1) #(b,s_concat,d)
     
     for block in self.blocks:
-      x = block(x, self.freq)
+      x = block(x, self.audio_rope_freq[:,:audio_len], self.conditional_rope_freq[:,:cond_len])
     
     x = self.rmse_norm(x)
     x = torch.stack([head(x).unsqueeze(2) for head in self.final_heads],dim=2)
     return x #(b,s,num_codebook,d)
-  
-#remember -> have to give some fix sequence length 

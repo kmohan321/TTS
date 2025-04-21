@@ -19,11 +19,11 @@ def Frequencies(seq_length: int, head_dim: int):
     return complex_freq.unsqueeze(0).unsqueeze(2)
 
 
-def apply_rope(self, x:torch.Tensor, freq:torch.Tensor):
+def apply_rope(x:torch.Tensor, freq:torch.Tensor):
     b ,s, h, d = x.shape
     x = x.view(b, s, h, -1, 2)
-    x = torch.view_as_complex(x)
-    x = x * freq[:,:s,:,:]
+    x = torch.view_as_complex(x.float())
+    x = x * freq[:,:s]
     x = torch.view_as_real(x)
     x = x.view(b,s,h,d)
     return x
@@ -58,16 +58,27 @@ class GQA(nn.Module):
     #output layer
     self.out_layer = nn.Linear(self.num_heads_q*self.head_dim,hidden_dims,bias=False)
   
-  def forward(self, x: torch.Tensor, freq: torch.Tensor, is_causal = True):
+  def forward(self, x: torch.Tensor, audio_rope_freq: torch.Tensor, conditional_rope_freq: torch.Tensor, is_causal = True):
     
     b, s, d = x.shape
     query = self.wq(x).view(b,s,self.num_heads_q,self.head_dim)
     key = self.wk(x).view(b,s,self.num_heads_kv,self.head_dim)
     value = self.wv(x).view(b,s,self.num_heads_kv,self.head_dim).transpose(1,2)
     
-    #(b,s,h,d) -> (b,h,s,d) 
-    rotated_query = apply_rope(query, freq).transpose(1,2) #applying the rope here
-    rotated_key = apply_rope(key, freq).transpose(1,2)
+    #(b,s,h,d) -> (b,h,s,d)
+    cond_len = conditional_rope_freq.shape[1]
+    rotated_query_cond = apply_rope(query[:,:cond_len], conditional_rope_freq)
+    rotated_key_cond = apply_rope(key[:,:cond_len], conditional_rope_freq)
+    
+    audio_len = audio_rope_freq.shape[1]
+    rotated_query_audio = apply_rope(query[:,cond_len:], audio_rope_freq)
+    rotated_key_audio = apply_rope(key[:,cond_len:], audio_rope_freq)
+    
+    rotated_query = torch.cat([rotated_query_cond, rotated_query_audio],dim=1).transpose(1,2)
+    rotated_key = torch.cat([rotated_key_cond, rotated_key_audio],dim=1).transpose(1,2)
+    
+    # rotated_query = apply_rope(query, freq).transpose(1,2) #applying the rope here
+    # rotated_key = apply_rope(key, freq).transpose(1,2)
 
     # Group query heads to match key heads
     #(B,Hq,S,D) -> (B,Hkv,G,S,D)
